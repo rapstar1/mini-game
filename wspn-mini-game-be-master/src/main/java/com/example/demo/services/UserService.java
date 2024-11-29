@@ -141,7 +141,7 @@ public class UserService {
         userRepository.incrementEnergyForAllUsersWithLessThanMaxEnergy(20, 1);
     }
 
-    // 2. 新增：验证钱包地址
+    // 验证钱包地址
     public boolean validateWalletAddress(String inputAddress) {
         // 使用 RestTemplate 访问外部 API 验证钱包地址
         String url = String.format("%s/v1/users/find?chainId=1&address=%s", walletApiUrl, inputAddress);
