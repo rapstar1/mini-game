@@ -1,140 +1,177 @@
-package com.example.demo.controllers;
-
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.web.bind.annotation.CrossOrigin;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RestController;
-
-import com.example.demo.models.Response;
-import com.example.demo.models.InitUserRequest;
-import com.example.demo.models.RollRequest;
-import com.example.demo.models.SetWalletAddressRequest;
-import com.example.demo.models.User;
-import com.example.demo.services.UserService;
-import com.example.demo.services.JwtUtil;  // 导入 JwtUtil 类
-
-import lombok.RequiredArgsConstructor;
+package com.example.demo.services;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+
+import com.example.demo.models.User;
+import com.example.demo.repos.UserRepository;
+
+import java.util.Optional;
+import java.util.Random;
 
 import javax.validation.Valid;
 
-import java.util.Map;
-import java.util.Optional;
-
-@RestController
-@CrossOrigin(origins = {"*"})
-@RequestMapping("/user")
-@RequiredArgsConstructor
-public class UserController {
+@Service
+public class UserService {
 
     @Autowired
-    private UserService userService;
+    private UserRepository userRepository;
+    private final Random random = new Random();
 
-    @Autowired
-    private JwtUtil jwtUtil;  // 注入 JwtUtil 类，用于生成 JWT
+    // 外部钱包 API 的 URL 和密钥
+    @Value("${wallet.api.url}")
+    private String walletApiUrl;  // 钱包 API 的基础 URL
 
-    @Value("${bot.token}")
-    private String BOT_TOKEN;
+    @Value("${wallet.api.key}")
+    private String apiKey;  // 钱包 API 的密钥
 
-    /**
-     * 初始化用户，验证用户信息并返回 JWT
-     */
-    @PostMapping("/init")
-    public ResponseEntity<?> initUser(@Valid @RequestBody InitUserRequest initUserRequest) {
-        String initData = initUserRequest.getInitdata();
+    // 验证来自 Telegram initData 的完整性
+    public boolean validateInitData(String initData, String botToken) {
+        try {
+            Map<String, String> params = parseQueryString(initData);
+            String dataCheckString = createDataCheckString(params);
+            String secretKey = hmacSha256(botToken, "WebAppData");
+            String hash = params.get("hash");
+            String calculatedHash = hmacSha256(dataCheckString, secretKey);
+            return calculatedHash.equals(hash);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
 
-        // 验证 initData 的完整性
-        boolean isValid = userService.validateInitData(initData, BOT_TOKEN);
+    // 解析查询字符串
+    private Map<String, String> parseQueryString(String queryString) {
+        Map<String, String> params = new TreeMap<>();
+        String[] pairs = queryString.split("&");
+        for (String pair : pairs) {
+            String[] keyValue = pair.split("=");
+            params.put(keyValue[0], keyValue[1]);
+        }
+        return params;
+    }
 
-        if (isValid) {
-            // 解析 initData 并提取 WebAppUser.ID
-            String telegramID = userService.extractUserId(initData);
-
-            // 根据 Telegram ID 获取用户信息, 如果用户不存在则创建新用户
-            Optional<User> userOptional = userService.getUser(telegramID);
-            if (userOptional.isEmpty()) {
-                return createResponse(HttpStatus.NOT_FOUND, Map.of("message", "Account not found."));
+    // 创建数据校验字符串
+    private String createDataCheckString(Map<String, String> params) {
+        StringBuilder dataCheckString = new StringBuilder();
+        for (Map.Entry<String, String> entry : params.entrySet()) {
+            if (!entry.getKey().equals("hash")) {
+                dataCheckString.append(entry.getKey()).append("=").append(entry.getValue()).append("\n");
             }
-            User user = userOptional.get();
+        }
+        return dataCheckString.toString().trim();
+    }
 
-            // 生成 JWT
-            String token = jwtUtil.generateToken(user.getUsername());  // 使用 JWT 生成工具生成 token
+    // 生成 HMAC SHA-256 校验
+    private String hmacSha256(String data, String key) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        SecretKeySpec secretKeySpec = new SecretKeySpec(key.getBytes(), "HmacSHA256");
+        mac.init(secretKeySpec);
+        byte[] hashBytes = mac.doFinal(data.getBytes());
+        return Base64.getEncoder().encodeToString(hashBytes);
+    }
 
-            return createResponse(HttpStatus.OK, Map.of( 
-                "message", "User verified successfully", 
-                "data", Map.of(
-                    "points", user.getPoints(),
-                    "energy", user.getEnergy(),
-                    "walletAddress", user.getWalletAddress(),
-                    "jwt", token  // 返回生成的 JWT
-                )
-            ));
+    // 从 initData 中提取 TelegramId
+    public String extractUserId(String initData) {
+        JSONObject jsonObject = new JSONObject(initData);
+        return jsonObject.getJSONObject("user").getString("id");
+    }
 
+    // 根据 TelegramId 获取用户信息，如果用户不存在则创建新用户，返回 Optional<User>
+    public Optional<User> getUser(String telegramId) {
+        User user = userRepository.findByTelegramId(telegramId);
+        // 如果用户不存在，则创建新用户
+        if (user == null) {
+            user = new User();
+            user.setTelegramId(telegramId);
+            user.setEnergy(20); // 初始化能量值
+            user.setPoints(0); // 初始化积分
+            userRepository.save(user); // 保存新用户
+        }
+        return Optional.ofNullable(user);
+    }
+
+    // 掷骰子，更新用户积分和能量值
+    public String rollDice(String telegramId) {
+        User user = userRepository.findByTelegramId(telegramId);
+        if (user == null) {
+            return "User does not exist";
+        }
+        if (user.getEnergy() <= 0) {
+            return "Not enough energy to play";
+        }
+        // 每次玩游戏消耗 1 点能量
+        user.setEnergy(user.getEnergy() - 1);
+        double rolledNumber = generateRandomNumber();
+        updatePoints(user, rolledNumber);
+        userRepository.save(user); // 保存用户对象
+        return String.valueOf(rolledNumber);
+    }
+
+    // 生成随机数，模拟骰子点数范围为 1 到 20 (D20)
+    private double generateRandomNumber() {
+        return random.nextInt(20) + 1; // 生成 1 到 20 之间的随机数
+    }
+
+    // 根据骰子点数更新用户积分
+    private void updatePoints(User user, double rolledNumber) {
+        // 如果点数为 20，则增加 999 积分， 如果点数为 1，则减少 999 积分， 否则增加点数
+        if (rolledNumber == 20) {
+            user.setPoints(user.getPoints() + 999);
+        } else if (rolledNumber == 1) {
+            user.setPoints(Math.max(user.getPoints() - 999, 0)); // 确保积分不会小于0
         } else {
-            return createResponse(HttpStatus.BAD_REQUEST, Map.of("message", "Invalid data"));
+            user.setPoints(user.getPoints() + rolledNumber);
         }
     }
 
-    /**
-     * 掷骰子接口
-     */
-    @PostMapping("/roll")
-    public ResponseEntity<?> roll(@Valid @RequestBody RollRequest rollRequest) {
-        String telegramId = rollRequest.getTelegramId();
-        Optional<User> user = userService.getUser(telegramId);
-        if (user.isEmpty()) {
-            return createResponse(HttpStatus.NOT_FOUND, Map.of("message", "Account not found."));
-        }
-        String rolledNumber = userService.rollDice(user.get().getTelegramId());
-        return createResponse(HttpStatus.OK, Map.of(
-            "message", "Dice rolled successfully", 
-            "data", Map.of(
-                "rolledNumber", rolledNumber,
-                "energy", user.get().getEnergy(),
-                "points", user.get().getPoints()
-            )
-        ));
+    // 设置钱包地址
+    public void setWalletAddress(User user, String walletAddress) {
+        user.setWalletAddress(walletAddress);
+        userRepository.save(user); // 保存用户对象
     }
 
-    /**
-     * 钱包地址验证
-     */
-    @PostMapping("/setWalletAddress")
-    public ResponseEntity<?> setWalletAddress(@Valid @RequestBody SetWalletAddressRequest setWalletAddressRequest) {
-        String walletAddress = setWalletAddressRequest.getWalletAddress();
-        String telegramId = setWalletAddressRequest.getTelegramId();
-        
-        // 获取用户信息
-        Optional<User> user = userService.getUser(telegramId);
-        if (user.isEmpty()) {
-            return createResponse(HttpStatus.NOT_FOUND, Map.of("message", "Account not found."));
-        }
-
-        // 调用 UserService 中的方法，验证钱包地址是否正确
-        boolean isValid = userService.validateWalletAddress(walletAddress);
-        if (!isValid) {
-            return createResponse(HttpStatus.BAD_REQUEST, Map.of("message", "Invalid wallet address"));
-        }
-
-        // 设置钱包地址
-        userService.setWalletAddress(user.get(), walletAddress);
-        return createResponse(HttpStatus.OK, Map.of("message", "Wallet address set successfully"));
-    }
-
-    // 定时任务，每 30 秒恢复用户能量值
-    @Scheduled(fixedRate = 30000)
+    // 恢复用户能量值
     public void recoverEnergy() {
-        userService.recoverEnergy();
+        userRepository.incrementEnergyForAllUsersWithLessThanMaxEnergy(20, 1);
     }
 
-    /**
-     * 创建统一的响应对象
+    // 2. 新增：验证钱包地址
+    public boolean validateWalletAddress(String inputAddress) {
+        // 使用 RestTemplate 访问外部 API 验证钱包地址
+        String url = String.format("%s/v1/users/find?chainId=1&address=%s", walletApiUrl, inputAddress);
+
+        try {
+            // 设置请求头
+            HttpHeaders headers = new HttpHeaders();
+            headers.set("accept", "application/json");
+            headers.set("x-api-key", apiKey);  // 设置 API 密钥
+
+            // 创建请求实体
+            HttpEntity<String> entity = new HttpEntity<>(headers);
+
+            // 使用 RestTemplate 发送 GET 请求到钱包 API
+            RestTemplate restTemplate = new RestTemplate();
+            ResponseEntity<String> response = restTemplate.exchange(url, HttpMethod.GET, entity, String.class);
+
+            // 假设外部 API 返回 "VALID" 表示地址有效
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody().contains("valid")) {
+                return true;  // 地址有效
+            }
+
+            return false;  // 地址无效
+        } catch (Exception e) {
+            // 如果发生异常（比如网络问题），返回 false
+            return false;
+        }
+    }
+}
+
      */
     private ResponseEntity<Response> createResponse(HttpStatus status, Map<String, Object> message) {
         return ResponseEntity.status(status).body(new Response(status.value(), message));
