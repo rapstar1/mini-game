@@ -1,11 +1,7 @@
 package com.example.demo.models;
 import lombok.Getter;
 import lombok.Setter;
-/**
- * Set Wallet Address Request
- *
- * @author Sunny SHEN
- */
+
 @Getter
 @Setter
 public class SetWalletAddressRequest {
