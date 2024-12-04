@@ -22,11 +22,6 @@ import lombok.Setter;
 @NoArgsConstructor
 @Builder
 
-/**
- * User
- *
- * @author Sunny SHEN
- */
 
 public class User {
     @Id
